@@ -1,12 +1,9 @@
 import React, { useEffect, useState } from "react";
 import Navbar from "./Navbar";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import axios from "axios";
-import { ledAPI, apiKeyAPI } from "../api";
+import { apiKeyAPI, heaterAPI, userAPI } from "../api";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-
-
-
 
 const weatherFor = (key) => {
   const k = (key || "").toLowerCase();
@@ -15,7 +12,6 @@ const weatherFor = (key) => {
   if (/clear/.test(k)) return { icon: "☀️", text: "Clear" };
   return { icon: "🌤️", text: "Sunny" };
 };
-
 
 const Dborad = () => {
   const [hives, setHives] = useState([]);
@@ -31,8 +27,37 @@ const Dborad = () => {
   const [time, setTime] = useState(new Date());
   const [lastWeatherUpdated, setLastWeatherUpdated] = useState(null);
   const farmId = localStorage.getItem("farmId");
-  console.log("Farm ID in Dashboard:", farmId);
-  
+
+  // Heater System State
+  const [heaterState, setHeaterState] = useState({
+    farmId: farmId ? Number(farmId) : 1,
+    temperature: null,
+    humidity: null,
+    heaterStatus: "OFF",
+    mode: "AUTO",
+    onThreshold: 30.0,
+    offThreshold: 35.0,
+    reason: "Initializing system...",
+    smsStatus: "NOT REQUIRED",
+    smsMessage: "",
+    maskedRecipient: "Loading...",
+    esp32Online: false,
+    lastStateChangeAt: null,
+    lastNotificationAt: null,
+  });
+
+  const [loadingHeater, setLoadingHeater] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [tempThresholds, setTempThresholds] = useState({ onThreshold: 30.0, offThreshold: 35.0 });
+  const [userProfile, setUserProfile] = useState({
+    name: "",
+    phoneNumber: "",
+    farmName: "",
+    address: "",
+    email: "",
+  });
+
   const OPENWEATHER_KEY = import.meta.env.VITE_OPENWEATHER_KEY || '8e88a178b6f8d7c81283a7bf200969fa';
   const THINGSPEAK_KEY = import.meta.env.VITE_THINGSPEAK_KEY || 'C4SNIR7EP4W21360';
   const THINGSPEAK_WRITE_KEY = import.meta.env.VITE_THINGSPEAK_WRITE_KEY || 'A0B9TJ5N4L8R72ZE';
@@ -42,79 +67,93 @@ const Dborad = () => {
     return () => clearInterval(t);
   }, []);
 
-const fetchWeather = async () => {
-  if (!OPENWEATHER_KEY) {
-    console.warn("VITE_OPENWEATHER_KEY is not set. Weather fetch skipped.");
-    return;
-  }
+  const fetchWeather = async () => {
+    if (!OPENWEATHER_KEY) return;
+    if (!navigator.geolocation) return;
 
-  if (!navigator.geolocation) {
-    console.error("Geolocation not supported");
-    return;
-  }
-
-  navigator.geolocation.getCurrentPosition(
-    async (pos) => {
-      const { latitude: lat, longitude: lon } = pos.coords;
-      try {
-        const res = await fetch(
-          `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=8e88a178b6f8d7c81283a7bf200969fa`
-        );
-        const data = await res.json();
-
-        if (res.status !== 200 || data.cod !== 200) {
-          console.error("Weather API Error:", data);
-          return;
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const { latitude: lat, longitude: lon } = pos.coords;
+        try {
+          const res = await fetch(
+            `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${OPENWEATHER_KEY}`
+          );
+          const data = await res.json();
+          if (res.status === 200 && data.cod === 200) {
+            setWeather({
+              temp: Math.round(data.main.temp),
+              humidity: data.main.humidity,
+              pressure: data.main.pressure,
+              wind: Math.round(data.wind?.speed || 0),
+              climate: data.weather?.[0]?.main || "Unknown",
+            });
+            setLastWeatherUpdated(new Date());
+          }
+        } catch (err) {
+          console.error("Error fetching weather:", err);
         }
+      },
+      (error) => {
+        console.error("Geolocation error:", error);
+      },
+      { enableHighAccuracy: true, maximumAge: 60000, timeout: 10000 }
+    );
+  };
 
-        setWeather({
-          temp: Math.round(data.main.temp),
-          humidity: data.main.humidity,
-          pressure: data.main.pressure,
-          wind: Math.round(data.wind?.speed || 0),
-          climate: data.weather?.[0]?.main || "Unknown",
+  // Fetch backend heater status
+  const fetchHeaterStatus = async () => {
+    try {
+      const res = await heaterAPI.getStatus(farmId || 1);
+      if (res.data) {
+        setHeaterState(res.data);
+        setHeaters((prev) => ({
+          ...prev,
+          [farmId || 1]: res.data.heaterStatus === "ON",
+        }));
+        setTempThresholds({
+          onThreshold: res.data.onThreshold ?? 30.0,
+          offThreshold: res.data.offThreshold ?? 35.0,
         });
-        setLastWeatherUpdated(new Date());
-      } catch (err) {
-        console.error("Error fetching weather:", err);
       }
-    },
-    (error) => {
-      console.error("Geolocation error:", error);
-      // keep UI friendly but don't spam alerts repeatedly
-      // alert("Please enable location permission to fetch weather details.");
-    },
-    { enableHighAccuracy: true, maximumAge: 60000, timeout: 10000 }
-  );
-};
+    } catch (err) {
+      console.error("Error fetching heater status from backend:", err);
+    }
+  };
 
-  // 🔹 Send API key to backend
- const sendApiKey = async (farmId, apiKey) => {
+  // Fetch user profile for mobile number display & editing
+  const fetchProfile = async () => {
+    try {
+      const res = await userAPI.getProfile();
+      if (res.data && res.data.user) {
+        setUserProfile(res.data.user);
+      }
+    } catch (err) {
+      console.error("Error fetching user profile:", err);
+    }
+  };
 
-    farmId = localStorage.getItem("farmId");
-  if (!farmId || !apiKey) {
-    alert("farmId or apiKey is missing!");
-    return;
-  }
-  
+  const sendApiKey = async (currentFarmId, apiKey) => {
+    const targetFarm = currentFarmId || localStorage.getItem("farmId");
+    if (!targetFarm || !apiKey) {
+      alert("farmId or apiKey is missing!");
+      return;
+    }
 
-  try {
-    const res = await apiKeyAPI.saveKey({
-      farmId: Number(farmId), 
-      apiKey
-    });
-    alert("API key saved successfully!");
-    console.log(res.data);
-  } catch (err) {
-    console.error(err.response?.data || err);
-    alert("Error saving API key");
-  }
-};
+    try {
+      await apiKeyAPI.saveKey({
+        farmId: Number(targetFarm),
+        apiKey,
+      });
+      alert("API key saved successfully!");
+    } catch (err) {
+      console.error(err.response?.data || err);
+      alert("Error saving API key");
+    }
+  };
 
-  
   const fetchHives = async () => {
     try {
-      // 1. Fetch recent feeds (results=10) to get both latest sensors and latest burner state
+      // 1. Fetch recent feeds (results=10)
       const resLatest = await fetch(
         `https://api.thingspeak.com/channels/3126283/feeds.json?api_key=${THINGSPEAK_KEY}&results=10`
       );
@@ -123,35 +162,53 @@ const fetchWeather = async () => {
       if (dataLatest && Array.isArray(dataLatest.feeds) && dataLatest.feeds.length > 0) {
         const feeds = dataLatest.feeds;
 
-        // A. Find latest burner state (from any recent entry that has field6)
-        const latestBurnerEntry = [...feeds].reverse().find(
-          (f) => f.field6 !== null && f.field6 !== undefined && f.field6 !== ""
-        );
-        if (latestBurnerEntry) {
-          const isBurnerOn = latestBurnerEntry.field6 === "1" || latestBurnerEntry.field6 === 1;
-          setHeaters((prev) => ({ ...prev, 1: isBurnerOn }));
-        }
-
-        // B. Find latest sensor telemetry (from the most recent entry with temp or humidity)
+        // Find latest sensor telemetry
         const latestSensorEntry =
           [...feeds].reverse().find((f) => f.field2 != null || f.field3 != null) ||
           feeds[feeds.length - 1];
 
         const lastUpdateTime = new Date(latestSensorEntry.created_at);
         const now = new Date();
-        const diffMin = (now - lastUpdateTime) / 60000; // minutes
+        const diffMin = (now - lastUpdateTime) / 60000;
+
+        const currentTemp = latestSensorEntry.field2 != null ? parseFloat(latestSensorEntry.field2) : null;
+        const currentHumidity = latestSensorEntry.field3 != null ? parseFloat(latestSensorEntry.field3) : null;
 
         const hiveData = [
           {
             id: 1,
-            temp: latestSensorEntry.field2 != null ? parseFloat(latestSensorEntry.field2) : 0,
-            humidity: latestSensorEntry.field3 != null ? parseFloat(latestSensorEntry.field3) : 0,
+            temp: currentTemp != null ? currentTemp : 0,
+            humidity: currentHumidity != null ? currentHumidity : 0,
             ph: latestSensorEntry.field4 != null ? parseFloat(latestSensorEntry.field4) : 0,
             weight: latestSensorEntry.field5 != null ? parseFloat(latestSensorEntry.field5) : 0,
-            live: diffMin < 5, // online if updated within last 5 minutes
+            live: diffMin < 5,
           },
         ];
         setHives(hiveData);
+
+        // Sync temperature telemetry to backend to evaluate hysteresis & trigger SMS if state changes
+        if (currentTemp != null) {
+          heaterAPI
+            .sendTelemetry({
+              farmId: Number(farmId || 1),
+              temperature: currentTemp,
+              humidity: currentHumidity,
+            })
+            .then((res) => {
+              if (res.data) {
+                setHeaterState((prev) => ({
+                  ...prev,
+                  heaterStatus: res.data.heaterStatus,
+                  mode: res.data.mode,
+                  reason: res.data.reason,
+                  temperature: currentTemp,
+                  humidity: currentHumidity,
+                  esp32Online: diffMin < 5,
+                }));
+              }
+            })
+            .catch(() => {});
+        }
       } else {
         setHives([]);
       }
@@ -164,18 +221,17 @@ const fetchWeather = async () => {
 
       if (dataHistory && Array.isArray(dataHistory.feeds) && dataHistory.feeds.length > 0) {
         const history = dataHistory.feeds
-          .filter(f => f.field2 != null || f.field3 != null || f.field4 != null)
-          .map(f => ({
-            time: new Date(f.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          .filter((f) => f.field2 != null || f.field3 != null || f.field4 != null)
+          .map((f) => ({
+            time: new Date(f.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
             temp: f.field2 ? parseFloat(f.field2) : null,
             humidity: f.field3 ? parseFloat(f.field3) : null,
-            ph: f.field4 ? parseFloat(f.field4) : null
+            ph: f.field4 ? parseFloat(f.field4) : null,
           }));
         setHiveHistory(history);
       } else {
         setHiveHistory([]);
       }
-
     } catch (err) {
       console.error("Error fetching hive data:", err);
       setHives([]);
@@ -183,139 +239,428 @@ const fetchWeather = async () => {
     }
   };
 
- 
   useEffect(() => {
     fetchWeather();
     fetchHives();
+    fetchHeaterStatus();
+    fetchProfile();
 
-    const hivesInterval = setInterval(fetchHives, 5000); // sync hive data & burner state every 5 sec
-    const weatherInterval = setInterval(fetchWeather, 300000); // every 5 min
+    const hivesInterval = setInterval(fetchHives, 5000);
+    const heaterInterval = setInterval(fetchHeaterStatus, 5000);
+    const weatherInterval = setInterval(fetchWeather, 300000);
 
     return () => {
       clearInterval(hivesInterval);
+      clearInterval(heaterInterval);
       clearInterval(weatherInterval);
     };
   }, []);
 
-  // 🔹 Calculate overall hive health
-  const avgPh =
-    hives.length > 0
-      ? hives.reduce((s, h) => s + (h.ph || 0), 0) / hives.length
-      : 0;
+  // Mode Control Handler
+  const handleModeChange = async (newMode) => {
+    try {
+      setLoadingHeater(true);
+      const res = await heaterAPI.setMode({
+        farmId: Number(farmId || 1),
+        mode: newMode,
+      });
+      if (res.data) {
+        fetchHeaterStatus();
+      }
+    } catch (err) {
+      console.error("Error changing mode:", err);
+      alert(err.response?.data?.message || "Failed to switch mode");
+    } finally {
+      setLoadingHeater(false);
+    }
+  };
 
-  const idealTemp = 35;
-  const idealHumidity = 65;
+  // Manual Heater Control Handler
+  const handleManualHeater = async (turnOn) => {
+    try {
+      setLoadingHeater(true);
+      const res = await heaterAPI.setManual({
+        farmId: Number(farmId || 1),
+        heater: turnOn,
+      });
+      if (res.data) {
+        fetchHeaterStatus();
+      }
+    } catch (err) {
+      console.error("Error changing heater state:", err);
+      alert(err.response?.data?.message || "Failed to control heater manually");
+    } finally {
+      setLoadingHeater(false);
+    }
+  };
 
-  const tempScore = Math.min(100, Math.abs((weather.temp - idealTemp) / 10) * 100);
-  const humidityScore = Math.min(100, Math.abs((weather.humidity - idealHumidity) / 35) * 100);
-  const phScore = Math.min(100, Math.abs((avgPh - 6.8) / 1.5) * 100);
-  const urgency = Math.round(tempScore * 0.5 + humidityScore * 0.3 + phScore * 0.2);
+  // Save Threshold Settings
+  const handleSaveThresholds = async (e) => {
+    e.preventDefault();
+    const onT = parseFloat(tempThresholds.onThreshold);
+    const offT = parseFloat(tempThresholds.offThreshold);
 
-  const gaugeColor = urgency > 60 ? "bg-red-500" : urgency > 30 ? "bg-yellow-400" : "bg-green-500";
-
-  const toggleHeater = async (id) => {
-    console.log("Toggling burner for hive ID:", id);
-    const nextVal = heaters[id] ? 0 : 1;
-    const currentHive = hives.find((h) => h.id === id);
-
-    let updateUrl = `https://api.thingspeak.com/update?api_key=${THINGSPEAK_WRITE_KEY}&field6=${nextVal}`;
-    if (currentHive && currentHive.temp > 0) {
-      updateUrl += `&field1=1&field2=${currentHive.temp}&field3=${currentHive.humidity}&field4=${currentHive.ph}&field5=${currentHive.weight}`;
+    if (isNaN(onT) || isNaN(offT)) {
+      alert("Please provide valid temperature numbers.");
+      return;
+    }
+    if (onT >= offT) {
+      alert("Validation Error: Heater ON threshold (" + onT + "°C) must be lower than Heater OFF threshold (" + offT + "°C) to maintain proper hysteresis.");
+      return;
     }
 
     try {
-      const res = await fetch(updateUrl);
-      const data = await res.text();
-      if (data.trim() === "0") {
-        alert("ThingSpeak rate limit: Please wait 15 seconds before toggling the burner again.");
-        return;
-      }
-      setHeaters((prev) => ({ ...prev, [id]: nextVal === 1 }));
+      await heaterAPI.updateSettings({
+        farmId: Number(farmId || 1),
+        onThreshold: onT,
+        offThreshold: offT,
+      });
+      setShowSettingsModal(false);
+      fetchHeaterStatus();
+      alert("Hysteresis thresholds updated successfully!");
     } catch (err) {
-      console.error("Error toggling burner on ThingSpeak:", err);
-      alert("Failed to toggle burner on ThingSpeak. Check connection.");
+      alert(err.response?.data?.message || "Failed to update thresholds");
     }
   };
 
-  const addHive = () => {
-    const newHive = {
-      id: hives.length + 1,
-      temp: 0,
-      humidity: 0,
-      ph: 0,
-      weight: 0,
-      live: false,
-    };
-    setHives((prev) => [...prev, newHive]);
+  // Save Profile / Registered Mobile Number
+  const handleSaveProfile = async (e) => {
+    e.preventDefault();
+    if (!userProfile.phoneNumber || userProfile.phoneNumber.trim().length < 8) {
+      alert("Please enter a valid mobile number.");
+      return;
+    }
+
+    try {
+      const res = await userAPI.updateProfile({
+        name: userProfile.name,
+        phoneNumber: userProfile.phoneNumber,
+        farmName: userProfile.farmName,
+        address: userProfile.address,
+      });
+
+      if (res.data && res.data.user) {
+        localStorage.setItem("user", JSON.stringify(res.data.user));
+        setUserProfile(res.data.user);
+        setShowProfileModal(false);
+        fetchHeaterStatus();
+        alert("Mobile number updated successfully! Future heater alerts will be delivered only to " + res.data.user.phoneNumber);
+      }
+    } catch (err) {
+      alert(err.response?.data?.message || "Failed to update profile");
+    }
   };
 
- 
-  const Gauge = ({ value = 0, size = 140, stroke = 12 }) => {
-    const radius = (size - stroke) / 2;
-    const circumference = 2 * Math.PI * radius;
-    const offset = circumference - (value / 100) * circumference;
-    return (
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <defs>
-          <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#33691e" />
-            <stop offset="100%" stopColor="#c8e6c9" />
-          </linearGradient>
-        </defs>
-        <circle cx={size / 2} cy={size / 2} r={radius} stroke="#c8e6c9" strokeWidth={stroke} fill="none" />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke="url(#g1)"
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          fill="none"
-          strokeDasharray={circumference}
-          strokeDashoffset={offset}
-          style={{ transform: "rotate(-90deg)", transformOrigin: "50% 50%" }}
-        />
-        <text x="50%" y="50%" dominantBaseline="middle" textAnchor="middle" fontSize="20" fill="#33691e">
-          {value}%
-        </text>
-      </svg>
-    );
-  };
+  const isHeaterOn = heaterState.heaterStatus === "ON";
+  const isAuto = heaterState.mode === "AUTO";
+  const displayTemp = heaterState.temperature != null
+    ? `${Number(heaterState.temperature).toFixed(1)}°C`
+    : hives[0]?.temp != null
+    ? `${Number(hives[0].temp).toFixed(1)}°C`
+    : "Sensor Error";
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: "#689f38" }}>
       <Navbar />
       <main className="mt-20 max-w-7xl mx-auto px-6 py-8 text-[#f0f4c3]">
-    
+        {/* HEADER */}
         <header className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
           <div>
             <h1 className="text-4xl font-bold text-[#f0f4c3]">Hive Dashboard 🐝</h1>
-            <p className="text-sm text-[#f0f4c3]/80">Overview of hive health and local weather</p>
+            <p className="text-sm text-[#f0f4c3]/80">
+              Smart IoT Bee Hive Monitoring, Automated Hysteresis Heating & Secure Alert System
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <span className="bg-[#558b2f] text-white px-3 py-1.5 rounded-lg text-sm font-semibold shadow" title="Ensure your ESP32 farmId matches this ID">
-              Farm ID: {farmId || "Not set"}
+            <span
+              className="bg-[#558b2f] text-white px-3 py-1.5 rounded-lg text-sm font-semibold shadow flex items-center gap-1.5"
+              title="Ensure your ESP32 farmId matches this ID"
+            >
+              <span>Farm ID: {farmId || "1"}</span>
             </span>
+
+            {/* Profile & Registered Mobile Button */}
+            <button
+              id="profile-settings-btn"
+              onClick={() => {
+                fetchProfile();
+                setShowProfileModal(true);
+              }}
+              className="bg-[#33691e] text-[#f0f4c3] px-3.5 py-2 rounded-lg shadow hover:bg-[#2e7d32] transition font-semibold text-sm flex items-center gap-1.5"
+            >
+              📱 Mobile Alerts: <span className="text-yellow-200">{heaterState.maskedRecipient || "Configured"}</span>
+            </button>
+
             <button
               onClick={() => {
                 const apiKey = prompt("Enter your API key:");
                 if (!apiKey) return;
                 sendApiKey(farmId, apiKey);
               }}
-              className="bg-[#f0f4c3] text-[#33691e] px-4 py-2 rounded-lg shadow hover:scale-105 transition-transform font-semibold"
+              className="bg-[#f0f4c3] text-[#33691e] px-4 py-2 rounded-lg shadow hover:scale-105 transition-transform font-semibold text-sm"
             >
-              Update key
-            </button>
-            <button
-              onClick={addHive}
-              className="bg-[#33691e] text-[#f0f4c3] px-4 py-2 rounded-lg shadow hover:bg-[#2e7d32] transition-transform"
-            >
-              Add Hive
+              Update API Key
             </button>
           </div>
         </header>
 
-        {/* WEATHER + SCORE */}
+        {/* ========================================================================= */}
+        {/* HEATER CONTROL & SYSTEM SAFETY STATUS (Requirement 4 & 24)               */}
+        {/* ========================================================================= */}
+        <section className="mb-8">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="bg-[#f0f4c3] text-[#33691e] rounded-3xl shadow-xl p-6 md:p-8 border-2 border-[#cddc39]"
+          >
+            {/* Top Bar: Title + Badges */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between pb-6 border-b border-[#cddc39] gap-4">
+              <div>
+                <div className="flex items-center gap-3">
+                  <span className="text-3xl">🔥</span>
+                  <h2 className="text-2xl font-bold tracking-tight text-[#33691e]">
+                    Smart Temperature & Heater Control
+                  </h2>
+                </div>
+                <p className="text-xs md:text-sm text-[#558b2f] mt-1 font-medium">
+                  Dual-mode controller with temperature hysteresis protection and dedicated SMS dispatch
+                </p>
+              </div>
+
+              {/* Status Badges */}
+              <div className="flex flex-wrap items-center gap-2.5">
+                {/* ESP32 Status */}
+                <div
+                  className={`px-3 py-1.5 rounded-full text-xs font-bold flex items-center gap-1.5 shadow-sm ${
+                    heaterState.esp32Online || hives[0]?.live
+                      ? "bg-green-100 text-green-800 border border-green-300"
+                      : "bg-red-100 text-red-800 border border-red-300"
+                  }`}
+                >
+                  <span
+                    className={`w-2.5 h-2.5 rounded-full ${
+                      heaterState.esp32Online || hives[0]?.live ? "bg-green-600 animate-pulse" : "bg-red-600"
+                    }`}
+                  />
+                  ESP32: {heaterState.esp32Online || hives[0]?.live ? "ONLINE" : "OFFLINE"}
+                </div>
+
+                {/* Mode Badge */}
+                <div
+                  className={`px-3 py-1.5 rounded-full text-xs font-bold uppercase shadow-sm ${
+                    isAuto ? "bg-blue-100 text-blue-800 border border-blue-300" : "bg-purple-100 text-purple-800 border border-purple-300"
+                  }`}
+                >
+                  Mode: {heaterState.mode}
+                </div>
+
+                {/* Heater State Badge */}
+                <div
+                  className={`px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider shadow-sm flex items-center gap-1.5 ${
+                    isHeaterOn
+                      ? "bg-red-600 text-white animate-pulse shadow-red-300"
+                      : "bg-gray-200 text-gray-700 border border-gray-400"
+                  }`}
+                >
+                  <span>{isHeaterOn ? "🔥 HEATER: ON" : "⚪ HEATER: OFF"}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Main Stats Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 my-6">
+              {/* Card 1: Hive Temperature */}
+              <div className="p-4 bg-[#dcedc8] rounded-2xl border border-[#c5e1a5] flex flex-col justify-between">
+                <span className="text-xs uppercase tracking-wider font-semibold text-[#558b2f]">
+                  Hive Temperature
+                </span>
+                <div className="my-2">
+                  <div className="text-3xl font-black text-[#2e7d32]">
+                    {displayTemp}
+                  </div>
+                  <div className="text-xs text-[#558b2f] mt-0.5">
+                    DHT11 Sensor Telemetry
+                  </div>
+                </div>
+                <div className="text-[11px] text-[#33691e]/80">
+                  Humidity: {hives[0]?.humidity != null ? `${hives[0].humidity}%` : "N/A"}
+                </div>
+              </div>
+
+              {/* Card 2: Hysteresis Thresholds */}
+              <div className="p-4 bg-[#dcedc8] rounded-2xl border border-[#c5e1a5] flex flex-col justify-between">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs uppercase tracking-wider font-semibold text-[#558b2f]">
+                    Automatic Thresholds
+                  </span>
+                  <button
+                    onClick={() => setShowSettingsModal(true)}
+                    className="text-[11px] text-[#2e7d32] font-bold hover:underline"
+                  >
+                    Edit
+                  </button>
+                </div>
+                <div className="my-2 space-y-1">
+                  <div className="text-xs flex justify-between font-semibold">
+                    <span>ON Below:</span>
+                    <span className="text-red-700 font-bold">{heaterState.onThreshold ?? 30.0}°C</span>
+                  </div>
+                  <div className="text-xs flex justify-between font-semibold">
+                    <span>OFF Above:</span>
+                    <span className="text-blue-700 font-bold">{heaterState.offThreshold ?? 35.0}°C</span>
+                  </div>
+                </div>
+                <div className="text-[10px] text-[#558b2f] italic">
+                  Hysteresis Band: {heaterState.onThreshold ?? 30.0}°C - {heaterState.offThreshold ?? 35.0}°C
+                </div>
+              </div>
+
+              {/* Card 3: SMS Dispatch & Recipient */}
+              <div className="p-4 bg-[#dcedc8] rounded-2xl border border-[#c5e1a5] flex flex-col justify-between">
+                <span className="text-xs uppercase tracking-wider font-semibold text-[#558b2f]">
+                  SMS Notification
+                </span>
+                <div className="my-1">
+                  <div className="text-sm font-bold flex items-center gap-1.5">
+                    Status:{" "}
+                    <span
+                      className={`font-black ${
+                        heaterState.smsStatus === "SENT"
+                          ? "text-green-700"
+                          : heaterState.smsStatus === "FAILED"
+                          ? "text-red-600"
+                          : "text-gray-700"
+                      }`}
+                    >
+                      {heaterState.smsStatus || "NOT REQUIRED"}
+                    </span>
+                  </div>
+                  <div className="text-xs text-[#33691e] font-medium mt-1">
+                    To: <span className="font-mono font-bold">{heaterState.maskedRecipient || "Registered Mobile"}</span>
+                  </div>
+                </div>
+                <div className="text-[10px] text-[#558b2f]">
+                  No default number; strictly user-bound
+                </div>
+              </div>
+
+              {/* Card 4: Last State Change Timestamp */}
+              <div className="p-4 bg-[#dcedc8] rounded-2xl border border-[#c5e1a5] flex flex-col justify-between">
+                <span className="text-xs uppercase tracking-wider font-semibold text-[#558b2f]">
+                  Activity Log
+                </span>
+                <div className="my-1 space-y-1 text-xs">
+                  <div>
+                    <span className="font-semibold">Last Change: </span>
+                    <span className="font-mono">
+                      {heaterState.lastStateChangeAt
+                        ? new Date(heaterState.lastStateChangeAt).toLocaleTimeString()
+                        : "No change yet"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="font-semibold">Last Alert: </span>
+                    <span className="font-mono">
+                      {heaterState.lastNotificationAt
+                        ? new Date(heaterState.lastNotificationAt).toLocaleTimeString()
+                        : "None"}
+                    </span>
+                  </div>
+                </div>
+                <div className="text-[10px] text-[#558b2f]">
+                  Anti-spam: alerts fire on transition only
+                </div>
+              </div>
+            </div>
+
+            {/* Current Reason Alert Box */}
+            <div className="p-3.5 bg-white/70 border border-[#cddc39] rounded-xl flex items-start gap-3 my-4">
+              <span className="text-lg">📢</span>
+              <div className="text-xs md:text-sm">
+                <span className="font-bold text-[#2e7d32]">Current System Decision: </span>
+                <span className="text-[#33691e] font-medium font-mono">
+                  "{heaterState.reason || "System running normally."}"
+                </span>
+              </div>
+            </div>
+
+            {/* Interactive Control Buttons */}
+            <div className="mt-6 pt-4 border-t border-[#cddc39] flex flex-col lg:flex-row items-center justify-between gap-4">
+              {/* Mode Selectors */}
+              <div className="flex items-center gap-3 w-full lg:w-auto">
+                <span className="text-sm font-bold text-[#33691e]">Select Mode:</span>
+                <div className="inline-flex rounded-xl shadow-sm bg-[#dcedc8] p-1 border border-[#c5e1a5]">
+                  <button
+                    id="mode-auto-btn"
+                    disabled={loadingHeater}
+                    onClick={() => handleModeChange("AUTO")}
+                    className={`px-5 py-2 text-sm font-bold rounded-lg transition-all ${
+                      isAuto
+                        ? "bg-[#33691e] text-[#f0f4c3] shadow-md scale-102"
+                        : "text-[#33691e] hover:bg-white/40"
+                    }`}
+                  >
+                    AUTO
+                  </button>
+                  <button
+                    id="mode-manual-btn"
+                    disabled={loadingHeater}
+                    onClick={() => handleModeChange("MANUAL")}
+                    className={`px-5 py-2 text-sm font-bold rounded-lg transition-all ${
+                      !isAuto
+                        ? "bg-[#33691e] text-[#f0f4c3] shadow-md scale-102"
+                        : "text-[#33691e] hover:bg-white/40"
+                    }`}
+                  >
+                    MANUAL
+                  </button>
+                </div>
+              </div>
+
+              {/* Manual Command Buttons or Auto Info */}
+              <div className="flex items-center gap-3 w-full lg:w-auto justify-end">
+                {!isAuto ? (
+                  <div className="flex items-center gap-3">
+                    <span className="text-xs font-semibold text-purple-900 bg-purple-100 px-2.5 py-1 rounded-md">
+                      Manual Controls Active
+                    </span>
+                    <button
+                      id="manual-heater-on-btn"
+                      disabled={loadingHeater}
+                      onClick={() => handleManualHeater(true)}
+                      className={`px-5 py-2 text-sm font-extrabold rounded-xl transition-all shadow-md ${
+                        isHeaterOn
+                          ? "bg-red-600 text-white ring-2 ring-red-400"
+                          : "bg-red-500/80 text-white hover:bg-red-600 hover:scale-105"
+                      }`}
+                    >
+                      HEATER ON
+                    </button>
+                    <button
+                      id="manual-heater-off-btn"
+                      disabled={loadingHeater}
+                      onClick={() => handleManualHeater(false)}
+                      className={`px-5 py-2 text-sm font-extrabold rounded-xl transition-all shadow-md ${
+                        !isHeaterOn
+                          ? "bg-gray-700 text-white ring-2 ring-gray-500"
+                          : "bg-gray-500 text-white hover:bg-gray-700 hover:scale-105"
+                      }`}
+                    >
+                      HEATER OFF
+                    </button>
+                  </div>
+                ) : (
+                  <div className="text-xs font-medium text-[#558b2f] bg-[#dcedc8] px-4 py-2 rounded-xl border border-[#c5e1a5]">
+                    🤖 <strong>AUTO Mode Active:</strong> Temperature automatically manages the heater with hysteresis. Manual commands are disabled.
+                  </div>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        </section>
+
+        {/* WEATHER + PARAMETER TRENDS */}
         <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           {/* Weather Card */}
           <motion.div
@@ -333,7 +678,11 @@ const fetchWeather = async () => {
               <div className="text-sm text-gray-600">{time.toLocaleTimeString()}</div>
             </div>
 
-            <div className="mt-2 text-xs text-gray-600">{lastWeatherUpdated ? `Updated: ${lastWeatherUpdated.toLocaleTimeString()}` : "No recent update"}</div>
+            <div className="mt-2 text-xs text-gray-600">
+              {lastWeatherUpdated
+                ? `Updated: ${lastWeatherUpdated.toLocaleTimeString()}`
+                : "No recent update"}
+            </div>
 
             <div className="mt-4 grid grid-cols-3 gap-2 text-center">
               <div className="p-2 bg-[#dcedc8] rounded-lg">
@@ -356,25 +705,34 @@ const fetchWeather = async () => {
             className="col-span-1 md:col-span-2 bg-[#f0f4c3] text-[#33691e] rounded-3xl shadow-lg p-6 flex flex-col justify-center border border-[#cddc39]"
             whileHover={{ scale: 1.01 }}
           >
-            <h3 className="text-xl font-semibold mb-4 text-center md:text-left">Parameter Trends (30-Min Intervals, Last 100 Readings)</h3>
+            <h3 className="text-xl font-semibold mb-4 text-center md:text-left">
+              Parameter Trends (30-Min Intervals, Last 100 Readings)
+            </h3>
             <div className="w-full h-72 sm:h-80 md:h-96">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={hiveHistory} margin={{ top: 5, right: 10, bottom: 20, left: -10 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#cddc39" />
-                  <XAxis dataKey="time" stroke="#33691e" tick={{fontSize: 10}} minTickGap={30} tickMargin={10} />
-                  <YAxis stroke="#33691e" tick={{fontSize: 10}} />
-                  <Tooltip contentStyle={{backgroundColor: '#f0f4c3', borderColor: '#cddc39', borderRadius: '8px', fontSize: '12px'}} />
-                  <Legend wrapperStyle={{ fontSize: '12px', paddingTop: '10px' }} />
-                  <Line type="monotone" dataKey="temp" stroke="#e53935" name="Temp (°C)" strokeWidth={2} dot={{r: 2}} activeDot={{r: 4}} />
-                  <Line type="monotone" dataKey="humidity" stroke="#1e88e5" name="Humidity (%)" strokeWidth={2} dot={{r: 2}} activeDot={{r: 4}} />
-                  <Line type="monotone" dataKey="ph" stroke="#8e24aa" name="pH" strokeWidth={2} dot={{r: 2}} activeDot={{r: 4}} />
+                  <XAxis dataKey="time" stroke="#33691e" tick={{ fontSize: 10 }} minTickGap={30} tickMargin={10} />
+                  <YAxis stroke="#33691e" tick={{ fontSize: 10 }} />
+                  <Tooltip
+                    contentStyle={{
+                      backgroundColor: "#f0f4c3",
+                      borderColor: "#cddc39",
+                      borderRadius: "8px",
+                      fontSize: "12px",
+                    }}
+                  />
+                  <Legend wrapperStyle={{ fontSize: "12px", paddingTop: "10px" }} />
+                  <Line type="monotone" dataKey="temp" stroke="#e53935" name="Temp (°C)" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
+                  <Line type="monotone" dataKey="humidity" stroke="#1e88e5" name="Humidity (%)" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
+                  <Line type="monotone" dataKey="ph" stroke="#8e24aa" name="pH" strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
           </motion.div>
         </section>
 
-        {/* HIVES */}
+        {/* HIVES LIST */}
         <section>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-semibold text-[#f0f4c3]">Hive Summary</h2>
@@ -405,9 +763,7 @@ const fetchWeather = async () => {
                       </div>
                     </div>
                     <div
-                      className={`w-3 h-3 rounded-full ${
-                        h.live ? "bg-green-500" : "bg-red-500"
-                      }`}
+                      className={`w-3 h-3 rounded-full ${h.live ? "bg-green-500 animate-pulse" : "bg-red-500"}`}
                       title={h.live ? "Online" : "Offline"}
                     />
                   </div>
@@ -420,24 +776,26 @@ const fetchWeather = async () => {
                     </div>
                     {!h.live && (
                       <div className="text-red-600 text-xs font-semibold">
-                        Device Offline (no update &gt;1 min)
+                        Device Offline (no update &gt;5 min)
                       </div>
                     )}
                   </div>
 
                   <div className="mt-2 flex items-center justify-between gap-2">
-                    <button
-                      onClick={() => toggleHeater(h.id)}
-                      className={`px-3 py-1 rounded-full text-sm font-semibold transition ${
-                        heaters[h.id]
-                          ? "bg-red-500 text-white shadow-md"
-                          : "bg-[#33691e] text-[#f0f4c3] hover:bg-[#2e7d32]"
+                    <span
+                      className={`px-3 py-1 rounded-full text-xs font-bold ${
+                        isHeaterOn
+                          ? "bg-red-600 text-white"
+                          : "bg-[#33691e] text-[#f0f4c3]"
                       }`}
                     >
-                      {heaters[h.id] ? "Burner ON" : "Turn On Burner"}
-                    </button>
-                    <button className="text-sm text-[#558b2f] hover:underline font-medium">
-                      Details
+                      {isHeaterOn ? "Heater ON" : "Heater OFF"}
+                    </span>
+                    <button
+                      onClick={() => setShowSettingsModal(true)}
+                      className="text-xs text-[#558b2f] hover:underline font-semibold"
+                    >
+                      Thresholds
                     </button>
                   </div>
                 </motion.div>
@@ -446,6 +804,185 @@ const fetchWeather = async () => {
           </div>
         </section>
       </main>
+
+      {/* ========================================================================= */}
+      {/* THRESHOLD SETTINGS MODAL (Requirement 2 & 23)                            */}
+      {/* ========================================================================= */}
+      <AnimatePresence>
+        {showSettingsModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[#f0f4c3] text-[#33691e] rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl border-2 border-[#cddc39]"
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-bold">Configure Hysteresis Thresholds</h3>
+                <button
+                  onClick={() => setShowSettingsModal(false)}
+                  className="text-gray-500 hover:text-gray-800 text-2xl font-bold"
+                >
+                  &times;
+                </button>
+              </div>
+
+              <p className="text-xs text-[#558b2f] mb-4">
+                Set the temperatures at which the heater automatically switches. To prevent rapid switching, ON threshold must be strictly lower than OFF threshold.
+              </p>
+
+              <form onSubmit={handleSaveThresholds} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
+                    Heater ON Threshold (°C)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={tempThresholds.onThreshold}
+                    onChange={(e) =>
+                      setTempThresholds({ ...tempThresholds, onThreshold: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-bold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
+                    required
+                  />
+                  <span className="text-[11px] text-[#558b2f]">Heater turns ON when temp falls below this value.</span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
+                    Heater OFF Threshold (°C)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={tempThresholds.offThreshold}
+                    onChange={(e) =>
+                      setTempThresholds({ ...tempThresholds, offThreshold: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-bold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
+                    required
+                  />
+                  <span className="text-[11px] text-[#558b2f]">Heater turns OFF when temp rises above this value.</span>
+                </div>
+
+                <div className="p-3 bg-[#dcedc8] rounded-xl text-xs text-[#33691e]">
+                  🛡️ <strong>Hysteresis Safety:</strong> Temperature between {tempThresholds.onThreshold || 30}°C and {tempThresholds.offThreshold || 35}°C keeps the previous heater state, protecting hardware from frequent cycling.
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowSettingsModal(false)}
+                    className="px-4 py-2 rounded-lg border border-[#cddc39] text-sm font-semibold hover:bg-[#dcedc8]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-lg bg-[#33691e] text-[#f0f4c3] text-sm font-bold shadow hover:bg-[#2e7d32]"
+                  >
+                    Save Thresholds
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ========================================================================= */}
+      {/* USER PROFILE & MOBILE NUMBER MODAL (Requirement 8, 10, 29, 30)           */}
+      {/* ========================================================================= */}
+      <AnimatePresence>
+        {showProfileModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[#f0f4c3] text-[#33691e] rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl border-2 border-[#cddc39]"
+            >
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-bold">Registered Alert Mobile Number</h3>
+                <button
+                  onClick={() => setShowProfileModal(false)}
+                  className="text-gray-500 hover:text-gray-800 text-2xl font-bold"
+                >
+                  &times;
+                </button>
+              </div>
+
+              <p className="text-xs text-[#558b2f] mb-4">
+                Heater state-change SMS alerts are sent exclusively to your registered mobile number below. No default phone number is used.
+              </p>
+
+              <form onSubmit={handleSaveProfile} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
+                    Mobile Number for SMS Alerts
+                  </label>
+                  <input
+                    type="tel"
+                    value={userProfile.phoneNumber || ""}
+                    onChange={(e) =>
+                      setUserProfile({ ...userProfile, phoneNumber: e.target.value })
+                    }
+                    placeholder="+919876543210"
+                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-mono font-bold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
+                    required
+                  />
+                  <span className="text-[11px] text-[#558b2f]">Format: E.164 (e.g. +919876543210)</span>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
+                    Your Name
+                  </label>
+                  <input
+                    type="text"
+                    value={userProfile.name || ""}
+                    onChange={(e) =>
+                      setUserProfile({ ...userProfile, name: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-semibold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
+                    Farm Name
+                  </label>
+                  <input
+                    type="text"
+                    value={userProfile.farmName || ""}
+                    onChange={(e) =>
+                      setUserProfile({ ...userProfile, farmName: e.target.value })
+                    }
+                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-semibold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
+                  />
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowProfileModal(false)}
+                    className="px-4 py-2 rounded-lg border border-[#cddc39] text-sm font-semibold hover:bg-[#dcedc8]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-lg bg-[#33691e] text-[#f0f4c3] text-sm font-bold shadow hover:bg-[#2e7d32]"
+                  >
+                    Update Mobile
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

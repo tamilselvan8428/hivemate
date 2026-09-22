@@ -33,4 +33,18 @@ export const apiKeyAPI = {
   saveKey: (data) => api.post('/api/saveKey', data),
 }
 
+export const heaterAPI = {
+  getStatus: (farmId) => api.get(farmId ? `/api/heater/status/${farmId}` : '/api/heater/status'),
+  setMode: (data) => api.post('/api/heater/mode', data),
+  setManual: (data) => api.post('/api/heater/manual', data),
+  updateSettings: (data) => api.post('/api/heater/settings', data),
+  getLogs: (farmId) => api.get(`/api/heater/logs/${farmId}`),
+  sendTelemetry: (data) => api.post('/api/heater/telemetry', data),
+}
+
+export const userAPI = {
+  getProfile: () => api.get('/api/user/profile'),
+  updateProfile: (data) => api.put('/api/user/profile', data),
+}
+
 export default api

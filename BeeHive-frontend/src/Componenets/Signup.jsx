@@ -28,6 +28,12 @@ const Signup = () => {
     setError('')
     setLoading(true)
 
+    if(!form.phoneNumber || form.phoneNumber.trim().length < 8){
+      setError('Please enter a valid mobile number (+91...) for heater SMS alerts')
+      setLoading(false)
+      return
+    }
+
     if(form.password.length < 6){
       setError('Password must be at least 6 characters long')
       setLoading(false)
