@@ -9,8 +9,8 @@
 // WiFi
 // =====================================================
 
-const char* ssid = "Airtel_n000_8386";
-const char* password = "air60300";
+const char* ssid = "Barath";
+const char* password = "barath123";
 
 // =====================================================
 // ThingSpeak Settings
