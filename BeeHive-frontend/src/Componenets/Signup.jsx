@@ -4,7 +4,7 @@ import { motion } from 'framer-motion'
 import Navbar from './Navbar'
 import honey from '../assets/Honey.jpg'
 import axios from 'axios'
-import { authAPI } from '../api'
+import { authAPI, getApiBaseUrl } from '../api'
 
 const Signup = () => {
   const navigate = useNavigate()
@@ -50,8 +50,14 @@ const Signup = () => {
       console.log('Signup successful')
       navigate('/dashboard') 
     } catch (err) {
-      console.error(err)
-      setError(err.response?.data?.message || 'Something went wrong')
+      console.error('Signup error:', err)
+      if (err.response && err.response.data) {
+        setError(err.response.data.message || err.response.data.error || 'Signup failed')
+      } else if (err.request) {
+        setError(`Cannot reach backend server at ${getApiBaseUrl()}. Check if phone is connected to host PC hotspot/Wi-Fi.`)
+      } else {
+        setError(err.message || 'Something went wrong')
+      }
     } finally {
       setLoading(false)
     }

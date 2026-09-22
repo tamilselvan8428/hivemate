@@ -9,95 +9,73 @@
 // WiFi Settings
 // =====================================================
 
+// Enter your WiFi Network or Mobile Hotspot credentials
 const char* ssid = "Barath";
 const char* password = "barath123";
 
 // =====================================================
-// Backend Server & Device Credentials
+// Backend Server & Device Configuration
 // =====================================================
 
-// Backend API endpoint for heater telemetry and state-change notification.
-// Replace with your backend IP or deployed domain:
-// Example local: "http://192.168.1.100:5000/api/heater/telemetry"
-// Example cloud: "https://smartbee-backend-xl0g.onrender.com/api/heater/telemetry"
-const char* backendTelemetryUrl = "http://192.168.1.100:5000/api/heater/telemetry";
+// Backend API endpoint on your local PC / Wi-Fi network.
+// Change 10.99.165.134 to your PC's IP if it changes.
+const char* backendTelemetryUrl = "http://10.99.165.134:5000/api/heater/telemetry";
+const char* backendStatusUrl    = "http://10.99.165.134:5000/api/heater/status/1";
 
-// Device API key for backend authorization (optional, from user's dashboard)
+// Device API key (optional, leave blank or copy from your user dashboard)
 const char* deviceApiKey = "";
+
+const int deviceFarmId = 1;
 
 // =====================================================
 // ThingSpeak Settings
 // =====================================================
 
-const char* thingSpeakServer = "http://api.thingspeak.com/update";
+const char* thingSpeakServer    = "http://api.thingspeak.com/update";
 const char* thingSpeakChannelId = "3126283";
-const char* thingSpeakWriteKey = "A0B9TJ5N4L8R72ZE";
-const char* thingSpeakReadKey  = "C4SNIR7EP4W21360";
+const char* thingSpeakWriteKey  = "A0B9TJ5N4L8R72ZE";
+const char* thingSpeakReadKey   = "C4SNIR7EP4W21360";
 
-// URL to fetch the last channel feed containing fields 1-8
+// Fallback ThingSpeak endpoint to poll control commands (Fields 6, 7, 8)
 const char* thingSpeakLastFeedUrl =
   "http://api.thingspeak.com/channels/3126283/feeds/last.json?api_key=C4SNIR7EP4W21360";
 
-// Fallback plain-text endpoint for field 6 (burner state)
-const char* burnerPollUrl =
-  "http://api.thingspeak.com/channels/3126283/fields/6/last.txt?api_key=C4SNIR7EP4W21360";
-
 // =====================================================
-// Device & Hardware Safety Configuration
+// Hardware Pin & Relay Safety Configuration
 // =====================================================
-
-const int deviceId = 1;
 
 // Relay / SSR / LED Active Logic:
 // Set to false for standard LED or Active-HIGH relay module (HIGH = ON, LOW = OFF)
 // Set to true for Active-LOW relay module (LOW = ON, HIGH = OFF)
 const bool RELAY_ACTIVE_LOW = false;
 
-// =====================================================
-// DHT11 Temperature & Humidity Sensor
-// =====================================================
+// Heater Output Pin (Controls Relay / SSR and on-board status LED)
+const int heaterRelayPin = 2;
 
+// DHT11 Sensor
 #define DHTPIN 4
 #define DHTTYPE DHT11
-
 DHT dht(DHTPIN, DHTTYPE);
 
-// =====================================================
 // pH Sensor UART
-// =====================================================
-
 HardwareSerial mySerial(2);
-
 #define RXD2 16
 #define TXD2 17
 
-// =====================================================
 // HX711 Load Cell
-// =====================================================
-
 #define HX711_DOUT 18
 #define HX711_SCK  19
-
 HX711 scale;
-
-// IMPORTANT: Change after calibrating your load cell
 float calibrationFactor = -7050.0;
-
-// =====================================================
-// Heater Relay Output & Status Indicator LED
-// =====================================================
-
-// In accordance with Hardware Safety (Requirement 7):
-// The GPIO controls a Relay or SSR. The LED mirrors the heater state.
-const int heaterRelayPin = 2; // Output pin to Relay/SSR module and LED indicator
 
 // =====================================================
 // Temperature Hysteresis & Control Mode Settings
 // =====================================================
 
-// Default temperature thresholds (Requirement 2):
+// Default temperature thresholds:
 // HEATER_ON_THRESHOLD  = 30.0°C (turn ON when temp < 30.0°C)
 // HEATER_OFF_THRESHOLD = 35.0°C (turn OFF when temp > 35.0°C)
+// In-between (30°C - 35°C): Keep current state (hysteresis)
 float heaterOnThreshold  = 30.0;
 float heaterOffThreshold = 35.0;
 
@@ -107,11 +85,11 @@ String controlMode = "AUTO";
 // Current physical heater state (true = ON, false = OFF)
 bool burnerState = false;
 
-// Previous heater state for actual state-change detection (Requirement 9 & 20)
+// Previous heater state for state-change detection
 bool previousBurnerState = false;
 bool isFirstRun = true;
 
-// Manual command value received from ThingSpeak/Backend (true = ON, false = OFF)
+// Manual command value received from Backend / ThingSpeak (true = ON, false = OFF)
 bool manualHeaterCommand = false;
 
 // Reason string for the current heater state decision
@@ -127,15 +105,15 @@ float temperature = NAN;
 float humidity = NAN;
 
 unsigned long lastControlPollTime = 0;
-const unsigned long controlPollInterval = 5000; // Check ThingSpeak control fields every 5 seconds
+const unsigned long controlPollInterval = 5000; // Poll commands every 5 seconds
 
 unsigned long lastSensorReadTime = 0;
-const unsigned long sensorReadInterval = 20000; // Read sensors, apply logic & upload every 20 seconds
+const unsigned long sensorReadInterval = 15000; // Read sensors, apply logic & upload every 15 seconds
 
 // Function Prototypes
 void setHardwareRelay(bool state);
 void applyHeaterLogic(float temp);
-void notifyBackendStateChange(float temp, bool newState, String mode, String reason);
+void sendTelemetryToBackend(float temp, float hum, bool heaterOn, String mode, String reason, bool stateChanged);
 void uploadToThingSpeak();
 void fetchControlCommands();
 float extractPH(String data);
@@ -152,6 +130,7 @@ void setup() {
   Serial.println();
   Serial.println("=================================================");
   Serial.println("   SMART BEE HIVE - HYSTERESIS HEATER SYSTEM    ");
+  Serial.println("   Mobile Alerts & Automatic Temperature Control");
   Serial.println("=================================================");
 
   // 1. Initialize Relay / LED pin (Default to safe OFF state)
@@ -177,23 +156,32 @@ void setup() {
   }
 
   // 5. Connect to WiFi
-  Serial.print("Connecting to WiFi");
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
   WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     delay(500);
     Serial.print(".");
+    attempts++;
   }
 
-  Serial.println();
-  Serial.println("WiFi Connected!");
-  Serial.print("ESP32 IP Address: ");
-  Serial.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.println("WiFi Connected!");
+    Serial.print("ESP32 IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println();
+    Serial.println("WiFi Connection Failed! Will retry in main loop.");
+  }
+
   Serial.println("=================================================");
 }
 
 
 // =====================================================
-// HARDWARE RELAY CONTROL (Requirement 7)
+// HARDWARE RELAY CONTROL
 // =====================================================
 
 void setHardwareRelay(bool state) {
@@ -206,7 +194,7 @@ void setHardwareRelay(bool state) {
 
 
 // =====================================================
-// TEMPERATURE HYSTERESIS & MODE LOGIC (Req 2, 3, 8, 9)
+// TEMPERATURE HYSTERESIS & HEATER SAFETY LOGIC
 // =====================================================
 
 void applyHeaterLogic(float temp) {
@@ -214,64 +202,70 @@ void applyHeaterLogic(float temp) {
   String reason = "";
 
   if (controlMode == "AUTO") {
-    // Requirement 8: Sensor Failure Safety
+    // Sensor Failure Safety: Fallback to safe OFF state if sensor returns NaN
     if (isnan(temp)) {
-      targetState = false; // Safe default OFF
-      reason = "Temperature sensor unavailable";
+      targetState = false;
+      reason = "Temperature sensor unavailable (Safety Fallback)";
       Serial.println("[SAFETY] DHT11 returned NaN! Heater forced to safe OFF.");
     }
-    // Requirement 2: Hysteresis Logic
+    // Hysteresis Rule 1: Below ON threshold -> Turn ON
     else if (temp < heaterOnThreshold) {
       targetState = true;
-      reason = "Temperature below " + String(heaterOnThreshold, 1) + "C";
+      reason = "Temperature (" + String(temp, 1) + "C) below " + String(heaterOnThreshold, 1) + "C";
     }
+    // Hysteresis Rule 2: Above OFF threshold -> Turn OFF
     else if (temp > heaterOffThreshold) {
       targetState = false;
-      reason = "Temperature above " + String(heaterOffThreshold, 1) + "C";
+      reason = "Temperature (" + String(temp, 1) + "C) above " + String(heaterOffThreshold, 1) + "C";
     }
+    // Hysteresis Rule 3: Within band [30°C - 35°C] -> Retain previous state
     else {
-      // 30°C <= temp <= 35°C: Keep previous heater state
       targetState = burnerState;
-      reason = "Temperature within hysteresis band (" + String(heaterOnThreshold, 1) + "C - " + String(heaterOffThreshold, 1) + "C)";
+      reason = "Temperature (" + String(temp, 1) + "C) within hysteresis band (" +
+               String(heaterOnThreshold, 1) + "C - " + String(heaterOffThreshold, 1) + "C). State maintained.";
     }
   } else {
-    // Requirement 3: MANUAL Mode
+    // MANUAL Mode: Direct user command from Software / ThingSpeak
     targetState = manualHeaterCommand;
-    reason = "Manual control";
+    reason = "Manual control command executed";
   }
 
   currentReason = reason;
 
-  // Requirement 9 & 20: Detect ACTUAL state changes (OFF -> ON or ON -> OFF)
-  bool stateChanged = (isFirstRun || targetState != previousBurnerState);
+  // Detect ACTUAL state transition (OFF -> ON or ON -> OFF)
+  bool stateChanged = (!isFirstRun && targetState != previousBurnerState);
 
-  // Apply to physical relay & LED indicator
+  // Apply to physical relay & status LED
   burnerState = targetState;
   setHardwareRelay(burnerState);
 
-  Serial.print("[HEATER CONTROLLER] State: ");
+  Serial.print("[HEATER LOGIC] State: ");
   Serial.print(burnerState ? "ON" : "OFF");
   Serial.print(" | Mode: ");
   Serial.print(controlMode);
   Serial.print(" | Reason: ");
   Serial.println(currentReason);
 
-  if (stateChanged) {
-    Serial.println(">>> ACTUAL HEATER STATE TRANSITION DETECTED! Notifying backend for SMS dispatch...");
-    notifyBackendStateChange(temp, burnerState, controlMode, currentReason);
+  if (stateChanged || isFirstRun) {
+    if (stateChanged) {
+      Serial.println(">>> STATE CHANGE DETECTED! Sending mobile notification alert to backend...");
+    }
     previousBurnerState = burnerState;
     isFirstRun = false;
   }
+
+  // Send telemetry to backend:
+  // Updates online status, thresholds, and dispatches top-bar mobile notifications if state changed
+  sendTelemetryToBackend(temp, humidity, burnerState, controlMode, currentReason, stateChanged);
 }
 
 
 // =====================================================
-// NOTIFY BACKEND STATE CHANGE (Requirement 6, 8, 9, 10)
+// BACKEND TELEMETRY & MOBILE NOTIFICATION DISPATCH
 // =====================================================
 
-void notifyBackendStateChange(float temp, bool newState, String mode, String reason) {
+void sendTelemetryToBackend(float temp, float hum, bool heaterOn, String mode, String reason, bool stateChanged) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[BACKEND NOTIFY] Skipped: WiFi disconnected.");
     return;
   }
 
@@ -283,30 +277,58 @@ void notifyBackendStateChange(float temp, bool newState, String mode, String rea
     http.addHeader("X-API-KEY", deviceApiKey);
   }
 
-  // Construct JSON payload
-  StaticJsonDocument<256> doc;
-  doc["farmId"] = deviceId;
+  // Build JSON payload (ArduinoJson v6 & v7 compatible)
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+  JsonDocument doc;
+#else
+  StaticJsonDocument<384> doc;
+#endif
+
+  doc["farmId"] = deviceFarmId;
   doc["temperature"] = isnan(temp) ? 0.0 : temp;
-  doc["humidity"] = isnan(humidity) ? 0.0 : humidity;
-  doc["heater"] = newState;
+  doc["humidity"] = isnan(hum) ? 0.0 : hum;
+  doc["heater"] = heaterOn;
   doc["mode"] = mode;
   doc["reason"] = reason;
 
   String requestBody;
   serializeJson(doc, requestBody);
 
-  Serial.println("[BACKEND NOTIFY] Sending state change to backend...");
-  Serial.println(requestBody);
-
   int httpCode = http.POST(requestBody);
   if (httpCode > 0) {
-    Serial.print("[BACKEND NOTIFY] Response code: ");
-    Serial.println(httpCode);
     String response = http.getString();
-    Serial.print("[BACKEND NOTIFY] Response: ");
-    Serial.println(response);
+    Serial.print("[BACKEND] Telemetry sync OK (HTTP ");
+    Serial.print(httpCode);
+    Serial.println(")");
+
+    // Parse backend response to stay synchronized with user's dashboard settings
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+    JsonDocument resDoc;
+#else
+    StaticJsonDocument<512> resDoc;
+#endif
+    DeserializationError err = deserializeJson(resDoc, response);
+    if (!err) {
+      // Sync dynamic thresholds from software dashboard
+      if (resDoc.containsKey("onThreshold") && !resDoc["onThreshold"].isNull()) {
+        heaterOnThreshold = resDoc["onThreshold"];
+      }
+      if (resDoc.containsKey("offThreshold") && !resDoc["offThreshold"].isNull()) {
+        heaterOffThreshold = resDoc["offThreshold"];
+      }
+      // Sync mode from software dashboard
+      if (resDoc.containsKey("mode") && !resDoc["mode"].isNull()) {
+        const char* m = resDoc["mode"];
+        controlMode = String(m);
+      }
+      // Sync manual command if in MANUAL mode
+      if (controlMode == "MANUAL" && resDoc.containsKey("heaterStatus") && !resDoc["heaterStatus"].isNull()) {
+        const char* hs = resDoc["heaterStatus"];
+        manualHeaterCommand = (strcmp(hs, "ON") == 0);
+      }
+    }
   } else {
-    Serial.print("[BACKEND NOTIFY] Failed, error: ");
+    Serial.print("[BACKEND] Telemetry failed: ");
     Serial.println(http.errorToString(httpCode));
   }
 
@@ -315,13 +337,13 @@ void notifyBackendStateChange(float temp, bool newState, String mode, String rea
 
 
 // =====================================================
-// SENSOR READING & UPLOAD
+// SENSOR READING & CONTROL EXECUTION
 // =====================================================
 
 void readAndUploadSensors() {
   Serial.println();
   Serial.println("=================================================");
-  Serial.println("Reading sensors...");
+  Serial.println("Reading sensors & evaluating heater...");
   Serial.println("=================================================");
 
   // 1. Read pH sensor
@@ -336,46 +358,43 @@ void readAndUploadSensors() {
   }
   phValue = extractPH(sensorData);
 
-  // 2. Read DHT11
+  // 2. Read DHT11 Temperature & Humidity
   temperature = dht.readTemperature();
   humidity = dht.readHumidity();
 
-  // 3. Read Load Cell
+  // 3. Read HX711 Load Cell
   if (scale.is_ready()) {
     weight = scale.get_units(5);
     if (weight < 0) {
       weight = 0;
     }
   } else {
-    Serial.println("HX711 not ready!");
     weight = NAN;
   }
 
-  // Print sensor data
+  // Print formatted telemetry
   Serial.println("========== SENSOR TELEMETRY ==========");
-  Serial.print("Device ID: ");
-  Serial.println(deviceId);
+  Serial.print("Farm ID:     "); Serial.println(deviceFarmId);
   Serial.print("Temperature: ");
-  if (!isnan(temperature)) Serial.print(temperature); else Serial.print("ERROR (NaN)");
-  Serial.println(" °C");
-  Serial.print("Humidity: ");
-  if (!isnan(humidity)) Serial.print(humidity); else Serial.print("ERROR");
-  Serial.println(" %");
-  Serial.print("pH: ");
-  if (!isnan(phValue)) Serial.println(phValue); else Serial.println("ERROR");
-  Serial.print("Weight: ");
-  if (!isnan(weight)) Serial.print(weight); else Serial.print("ERROR");
-  Serial.println(" kg");
+  if (!isnan(temperature)) { Serial.print(temperature, 1); Serial.println(" °C"); }
+  else { Serial.println("DHT11 ERROR (NaN)"); }
+  Serial.print("Humidity:    ");
+  if (!isnan(humidity)) { Serial.print(humidity, 1); Serial.println(" %"); }
+  else { Serial.println("DHT11 ERROR"); }
+  Serial.print("pH Value:    ");
+  if (!isnan(phValue)) { Serial.println(phValue, 2); }
+  else { Serial.println("UART Offline"); }
+  Serial.print("Hive Weight: ");
+  if (!isnan(weight)) { Serial.print(weight, 2); Serial.println(" kg"); }
+  else { Serial.println("HX711 Offline"); }
   Serial.println("======================================");
 
-  // 4. Apply Temperature Hysteresis & Heater Safety Decisions
+  // 4. Apply Temperature Hysteresis & Safety Logic
   applyHeaterLogic(temperature);
 
-  // 5. Upload to ThingSpeak (Requirement 5)
+  // 5. Upload to ThingSpeak (Fields 1-8 preserved)
   if (!isnan(temperature) && !isnan(humidity)) {
     uploadToThingSpeak();
-  } else {
-    Serial.println("WARNING: DHT11 temperature/humidity failed. Skipping ThingSpeak upload.");
   }
 }
 
@@ -388,19 +407,19 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected! Reconnecting...");
     WiFi.reconnect();
-    delay(1000);
+    delay(2000);
     return;
   }
 
   unsigned long currentMillis = millis();
 
-  // 1. Check control mode & manual commands from ThingSpeak (every 5 seconds)
+  // 1. Check control mode & manual commands from Backend / ThingSpeak (every 5 seconds)
   if (currentMillis - lastControlPollTime >= controlPollInterval || lastControlPollTime == 0) {
     lastControlPollTime = currentMillis;
     fetchControlCommands();
   }
 
-  // 2. Read sensors, apply hysteresis logic & upload to ThingSpeak (every 20 seconds)
+  // 2. Read sensors, evaluate hysteresis logic & dispatch notifications (every 15 seconds)
   if (currentMillis - lastSensorReadTime >= sensorReadInterval || lastSensorReadTime == 0) {
     lastSensorReadTime = currentMillis;
     readAndUploadSensors();
@@ -411,12 +430,12 @@ void loop() {
 
 
 // =====================================================
-// THINGSPEAK UPLOAD (Requirement 5)
-// Field 1 = Device ID
-// Field 2 = Temperature
-// Field 3 = Humidity
+// THINGSPEAK UPLOAD (Fields 1 - 8)
+// Field 1 = Device / Farm ID
+// Field 2 = Temperature (°C)
+// Field 3 = Humidity (%)
 // Field 4 = pH
-// Field 5 = Weight
+// Field 5 = Weight (kg)
 // Field 6 = Heater State (0 = OFF, 1 = ON)
 // Field 7 = Control Mode (0 = AUTO, 1 = MANUAL)
 // Field 8 = Manual Heater Command (0 = OFF, 1 = ON)
@@ -430,7 +449,7 @@ void uploadToThingSpeak() {
   String url =
     String(thingSpeakServer) +
     "?api_key=" + String(thingSpeakWriteKey) +
-    "&field1=" + String(deviceId) +
+    "&field1=" + String(deviceFarmId) +
     "&field2=" + String(temperature, 2) +
     "&field3=" + String(humidity, 2) +
     "&field4=" + (isnan(phValue) ? "0.00" : String(phValue, 2)) +
@@ -439,16 +458,15 @@ void uploadToThingSpeak() {
     "&field7=" + String(controlMode == "MANUAL" ? "1" : "0") +
     "&field8=" + String(manualHeaterCommand ? "1" : "0");
 
-  Serial.println("[THINGSPEAK] Uploading channel data...");
   http.begin(url);
   int httpCode = http.GET();
 
   if (httpCode > 0) {
     String response = http.getString();
     if (response != "0") {
-      Serial.println("[THINGSPEAK] Upload successful!");
+      Serial.println("[THINGSPEAK] Upload successful (Entry: " + response + ")");
     } else {
-      Serial.println("[THINGSPEAK] Rate limited (wait 15s).");
+      Serial.println("[THINGSPEAK] Rate limited (requires 15s interval).");
     }
   } else {
     Serial.print("[THINGSPEAK] Upload failed: ");
@@ -460,49 +478,76 @@ void uploadToThingSpeak() {
 
 
 // =====================================================
-// FETCH CONTROL COMMANDS (Fields 6, 7, 8)
+// FETCH CONTROL COMMANDS (Backend sync with ThingSpeak fallback)
 // =====================================================
 
 void fetchControlCommands() {
   if (WiFi.status() != WL_CONNECTED) return;
 
+  // 1. Primary: Sync directly from Backend Server
   HTTPClient http;
-  if (http.begin(thingSpeakLastFeedUrl)) {
+  if (http.begin(backendStatusUrl)) {
+    http.setTimeout(2500);
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
       String response = http.getString();
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+      JsonDocument doc;
+#else
       StaticJsonDocument<512> doc;
+#endif
+      DeserializationError error = deserializeJson(doc, response);
+      if (!error) {
+        if (doc.containsKey("mode") && !doc["mode"].isNull()) {
+          controlMode = String((const char*)doc["mode"]);
+        }
+        if (doc.containsKey("onThreshold") && !doc["onThreshold"].isNull()) {
+          heaterOnThreshold = doc["onThreshold"];
+        }
+        if (doc.containsKey("offThreshold") && !doc["offThreshold"].isNull()) {
+          heaterOffThreshold = doc["offThreshold"];
+        }
+        if (controlMode == "MANUAL" && doc.containsKey("heaterStatus") && !doc["heaterStatus"].isNull()) {
+          const char* hs = doc["heaterStatus"];
+          manualHeaterCommand = (strcmp(hs, "ON") == 0);
+        }
+        http.end();
+        return; // Synchronized via backend
+      }
+    }
+    http.end();
+  }
+
+  // 2. Fallback: Sync via ThingSpeak Channel Fields 6, 7, 8
+  if (http.begin(thingSpeakLastFeedUrl)) {
+    http.setTimeout(3000);
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
+      String response = http.getString();
+#if ARDUINOJSON_VERSION_MAJOR >= 7
+      JsonDocument doc;
+#else
+      StaticJsonDocument<512> doc;
+#endif
       DeserializationError error = deserializeJson(doc, response);
 
       if (!error) {
         // Field 7: Control Mode (0 = AUTO, 1 = MANUAL)
         if (doc.containsKey("field7") && !doc["field7"].isNull()) {
           const char* f7 = doc["field7"];
-          if (strcmp(f7, "1") == 0) {
-            controlMode = "MANUAL";
-          } else if (strcmp(f7, "0") == 0) {
-            controlMode = "AUTO";
-          }
+          controlMode = (strcmp(f7, "1") == 0) ? "MANUAL" : "AUTO";
         }
 
         // Field 8: Manual Heater Command (0 = OFF, 1 = ON)
         if (doc.containsKey("field8") && !doc["field8"].isNull()) {
           const char* f8 = doc["field8"];
-          if (strcmp(f8, "1") == 0) {
-            manualHeaterCommand = true;
-          } else if (strcmp(f8, "0") == 0) {
-            manualHeaterCommand = false;
-          }
+          manualHeaterCommand = (strcmp(f8, "1") == 0);
         }
 
-        // Fallback for field 6 if manual mode
+        // Field 6 fallback for manual heater state
         if (controlMode == "MANUAL" && doc.containsKey("field6") && !doc["field6"].isNull()) {
           const char* f6 = doc["field6"];
-          if (strcmp(f6, "1") == 0) {
-            manualHeaterCommand = true;
-          } else if (strcmp(f6, "0") == 0) {
-            manualHeaterCommand = false;
-          }
+          manualHeaterCommand = (strcmp(f6, "1") == 0);
         }
       }
     }
@@ -512,7 +557,7 @@ void fetchControlCommands() {
 
 
 // =====================================================
-// EXTRACT pH
+// EXTRACT pH VALUE FROM UART STRING
 // =====================================================
 
 float extractPH(String data) {

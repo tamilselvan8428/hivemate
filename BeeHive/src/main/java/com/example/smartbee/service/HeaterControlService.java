@@ -4,6 +4,7 @@ import com.example.smartbee.model.HeaterLog;
 import com.example.smartbee.model.HeaterState;
 import com.example.smartbee.model.Led;
 import com.example.smartbee.model.User;
+import com.example.smartbee.repository.AppNotificationRepository;
 import com.example.smartbee.repository.HeaterLogRepository;
 import com.example.smartbee.repository.HeaterStateRepository;
 import com.example.smartbee.repository.LedRepository;
@@ -28,6 +29,7 @@ public class HeaterControlService {
 
     private final HeaterStateRepository heaterStateRepository;
     private final HeaterLogRepository heaterLogRepository;
+    private final AppNotificationRepository appNotificationRepository;
     private final UserRepository userRepository;
     private final LedRepository ledRepository;
     private final SmsService smsService;
@@ -250,6 +252,25 @@ public class HeaterControlService {
             heaterLog.setRecipientPhone(result.getMaskedRecipient());
             heaterLog.setTimestamp(now);
             heaterLogRepository.save(heaterLog);
+
+            // Create App Notification for Mobile Top Status Bar & App Alert Center
+            try {
+                com.example.smartbee.model.AppNotification appNotification = new com.example.smartbee.model.AppNotification();
+                appNotification.setFarmId(farmId);
+                appNotification.setTitle("SmartBee Alert: Heater " + targetStatus);
+                String tempFormatted = (currentTemp != null && !Double.isNaN(currentTemp)) ? String.format("%.1f°C", currentTemp) : "N/A";
+                appNotification.setMessage(String.format("Temperature: %s | Mode: %s | Reason: %s", tempFormatted, state.getMode(), reason));
+                appNotification.setTemperature(currentTemp);
+                appNotification.setHeaterStatus(targetStatus);
+                appNotification.setMode(state.getMode());
+                appNotification.setReason(reason);
+                appNotification.setRead(false);
+                appNotification.setCreatedAt(now);
+                appNotificationRepository.save(appNotification);
+                log.info("[APP NOTIFICATION] Saved alert for Farm {}: Heater {}", farmId, targetStatus);
+            } catch (Exception ex) {
+                log.error("[APP NOTIFICATION] Error saving alert: {}", ex.getMessage());
+            }
         } else {
             log.debug("[HEATER] Farm {}: State remains {}. No SMS dispatched.", farmId, targetStatus);
         }

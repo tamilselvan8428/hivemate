@@ -4,6 +4,7 @@ import com.example.smartbee.model.HeaterLog;
 import com.example.smartbee.model.HeaterState;
 import com.example.smartbee.model.Led;
 import com.example.smartbee.model.User;
+import com.example.smartbee.repository.AppNotificationRepository;
 import com.example.smartbee.repository.HeaterLogRepository;
 import com.example.smartbee.repository.HeaterStateRepository;
 import com.example.smartbee.repository.LedRepository;
@@ -38,6 +39,9 @@ public class HeaterControlServiceTest {
 
     @Mock
     private LedRepository ledRepository;
+
+    @Mock
+    private AppNotificationRepository appNotificationRepository;
 
     @Mock
     private SmsService smsService;

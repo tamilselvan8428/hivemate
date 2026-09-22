@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import Navbar from "./Navbar";
 import { motion, AnimatePresence } from "framer-motion";
 import axios from "axios";
-import { apiKeyAPI, heaterAPI, userAPI } from "../api";
+import { apiKeyAPI, heaterAPI, userAPI, notificationAPI } from "../api";
+import { notificationService } from "../services/notificationService";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 const weatherFor = (key) => {
@@ -18,9 +19,9 @@ const Dborad = () => {
   const [hiveHistory, setHiveHistory] = useState([]);
   const [heaters, setHeaters] = useState({});
   const [weather, setWeather] = useState({
-    temp: 25,
-    humidity: 60,
-    pressure: 1013,
+    temp: 24,
+    humidity: 50,
+    pressure: 1012,
     wind: 0,
     climate: "Sunny",
   });
@@ -49,6 +50,14 @@ const Dborad = () => {
   const [loadingHeater, setLoadingHeater] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showNotificationCenter, setShowNotificationCenter] = useState(false);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [lastTriggeredNotifId, setLastTriggeredNotifId] = useState(null);
+
+  // Ref tracking last known heater status to ensure notifications fire ONLY on state transition (OFF -> ON or ON -> OFF)
+  const lastKnownHeaterStatusRef = useRef(null);
+
   const [tempThresholds, setTempThresholds] = useState({ onThreshold: 30.0, offThreshold: 35.0 });
   const [userProfile, setUserProfile] = useState({
     name: "",
@@ -105,6 +114,21 @@ const Dborad = () => {
     try {
       const res = await heaterAPI.getStatus(farmId || 1);
       if (res.data) {
+        const newStatus = res.data.heaterStatus;
+        if (newStatus) {
+          // Fire alert ONLY on actual state transition (OFF -> ON or ON -> OFF)
+          if (lastKnownHeaterStatusRef.current !== null && lastKnownHeaterStatusRef.current !== newStatus) {
+            console.log(`[STATE CHANGE DETECTED] ${lastKnownHeaterStatusRef.current} -> ${newStatus}`);
+            notificationService.showHeaterNotification({
+              status: newStatus,
+              temperature: res.data.temperature,
+              mode: res.data.mode,
+              reason: res.data.reason || `Heater state changed to ${newStatus}`,
+            });
+          }
+          lastKnownHeaterStatusRef.current = newStatus;
+        }
+
         setHeaterState(res.data);
         setHeaters((prev) => ({
           ...prev,
@@ -117,6 +141,19 @@ const Dborad = () => {
       }
     } catch (err) {
       console.error("Error fetching heater status from backend:", err);
+    }
+  };
+
+  // Fetch application notifications for the in-app alert center list ONLY (never loops popup alerts)
+  const fetchNotifications = async () => {
+    try {
+      const res = await notificationAPI.getNotifications(farmId || 1);
+      if (res.data && res.data.notifications) {
+        setNotifications(res.data.notifications);
+        setUnreadCount(res.data.unreadCount || 0);
+      }
+    } catch (err) {
+      console.warn("Notification sync:", err);
     }
   };
 
@@ -153,7 +190,6 @@ const Dborad = () => {
 
   const fetchHives = async () => {
     try {
-      // 1. Fetch recent feeds (results=10)
       const resLatest = await fetch(
         `https://api.thingspeak.com/channels/3126283/feeds.json?api_key=${THINGSPEAK_KEY}&results=10`
       );
@@ -162,7 +198,6 @@ const Dborad = () => {
       if (dataLatest && Array.isArray(dataLatest.feeds) && dataLatest.feeds.length > 0) {
         const feeds = dataLatest.feeds;
 
-        // Find latest sensor telemetry
         const latestSensorEntry =
           [...feeds].reverse().find((f) => f.field2 != null || f.field3 != null) ||
           feeds[feeds.length - 1];
@@ -186,7 +221,7 @@ const Dborad = () => {
         ];
         setHives(hiveData);
 
-        // Sync temperature telemetry to backend to evaluate hysteresis & trigger SMS if state changes
+        // Forward telemetry to backend to apply hysteresis & dispatch notifications if state changes
         if (currentTemp != null) {
           heaterAPI
             .sendTelemetry({
@@ -196,9 +231,23 @@ const Dborad = () => {
             })
             .then((res) => {
               if (res.data) {
+                const newStatus = res.data.heaterStatus;
+                if (newStatus) {
+                  // Trigger mobile top status bar alert ONLY if state genuinely changed!
+                  if (lastKnownHeaterStatusRef.current !== null && lastKnownHeaterStatusRef.current !== newStatus) {
+                    notificationService.showHeaterNotification({
+                      status: newStatus,
+                      temperature: currentTemp,
+                      mode: res.data.mode,
+                      reason: res.data.reason,
+                    });
+                  }
+                  lastKnownHeaterStatusRef.current = newStatus;
+                }
+
                 setHeaterState((prev) => ({
                   ...prev,
-                  heaterStatus: res.data.heaterStatus,
+                  heaterStatus: newStatus,
                   mode: res.data.mode,
                   reason: res.data.reason,
                   temperature: currentTemp,
@@ -213,7 +262,7 @@ const Dborad = () => {
         setHives([]);
       }
 
-      // 2. Fetch 30-minute average data for the historical graph
+      // 30-minute average data for historical graph
       const resHistory = await fetch(
         `https://api.thingspeak.com/channels/3126283/feeds.json?api_key=${THINGSPEAK_KEY}&results=100&average=30`
       );
@@ -240,18 +289,24 @@ const Dborad = () => {
   };
 
   useEffect(() => {
+    // Initialize Android Notification Channel on startup
+    notificationService.init();
+
     fetchWeather();
     fetchHives();
     fetchHeaterStatus();
     fetchProfile();
+    fetchNotifications();
 
     const hivesInterval = setInterval(fetchHives, 5000);
     const heaterInterval = setInterval(fetchHeaterStatus, 5000);
+    const notifInterval = setInterval(fetchNotifications, 5000);
     const weatherInterval = setInterval(fetchWeather, 300000);
 
     return () => {
       clearInterval(hivesInterval);
       clearInterval(heaterInterval);
+      clearInterval(notifInterval);
       clearInterval(weatherInterval);
     };
   }, []);
@@ -266,6 +321,7 @@ const Dborad = () => {
       });
       if (res.data) {
         fetchHeaterStatus();
+        fetchNotifications();
       }
     } catch (err) {
       console.error("Error changing mode:", err);
@@ -284,7 +340,18 @@ const Dborad = () => {
         heater: turnOn,
       });
       if (res.data) {
+        const newStatus = turnOn ? "ON" : "OFF";
+        if (lastKnownHeaterStatusRef.current !== newStatus) {
+          lastKnownHeaterStatusRef.current = newStatus;
+          notificationService.showHeaterNotification({
+            status: newStatus,
+            temperature: heaterState.temperature,
+            mode: "MANUAL",
+            reason: "Manual control command executed",
+          });
+        }
         fetchHeaterStatus();
+        fetchNotifications();
       }
     } catch (err) {
       console.error("Error changing heater state:", err);
@@ -292,6 +359,17 @@ const Dborad = () => {
     } finally {
       setLoadingHeater(false);
     }
+  };
+
+  // Test Mobile Notification
+  const handleTestMobileNotification = () => {
+    notificationService.showHeaterNotification({
+      status: heaterState.heaterStatus || "ON",
+      temperature: heaterState.temperature || 28.5,
+      mode: heaterState.mode || "AUTO",
+      reason: "Test mobile alert notification in top status bar",
+      force: true,
+    });
   };
 
   // Save Threshold Settings
@@ -323,7 +401,7 @@ const Dborad = () => {
     }
   };
 
-  // Save Profile / Registered Mobile Number
+  // Save Profile
   const handleSaveProfile = async (e) => {
     e.preventDefault();
     if (!userProfile.phoneNumber || userProfile.phoneNumber.trim().length < 8) {
@@ -344,7 +422,7 @@ const Dborad = () => {
         setUserProfile(res.data.user);
         setShowProfileModal(false);
         fetchHeaterStatus();
-        alert("Mobile number updated successfully! Future heater alerts will be delivered only to " + res.data.user.phoneNumber);
+        alert("Mobile number updated successfully!");
       }
     } catch (err) {
       alert(err.response?.data?.message || "Failed to update profile");
@@ -368,27 +446,40 @@ const Dborad = () => {
           <div>
             <h1 className="text-4xl font-bold text-[#f0f4c3]">Hive Dashboard 🐝</h1>
             <p className="text-sm text-[#f0f4c3]/80">
-              Smart IoT Bee Hive Monitoring, Automated Hysteresis Heating & Secure Alert System
+              Smart IoT Bee Hive Monitoring, Automated Hysteresis Heating & Mobile Notifications
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <span
               className="bg-[#558b2f] text-white px-3 py-1.5 rounded-lg text-sm font-semibold shadow flex items-center gap-1.5"
-              title="Ensure your ESP32 farmId matches this ID"
             >
               <span>Farm ID: {farmId || "1"}</span>
             </span>
 
-            {/* Profile & Registered Mobile Button */}
+            {/* Mobile App Notification Alerts Button */}
             <button
-              id="profile-settings-btn"
+              id="notification-center-btn"
               onClick={() => {
-                fetchProfile();
-                setShowProfileModal(true);
+                fetchNotifications();
+                setShowNotificationCenter(true);
               }}
-              className="bg-[#33691e] text-[#f0f4c3] px-3.5 py-2 rounded-lg shadow hover:bg-[#2e7d32] transition font-semibold text-sm flex items-center gap-1.5"
+              className="relative bg-[#33691e] text-[#f0f4c3] px-3.5 py-2 rounded-lg shadow hover:bg-[#2e7d32] transition font-semibold text-sm flex items-center gap-2"
             >
-              📱 Mobile Alerts: <span className="text-yellow-200">{heaterState.maskedRecipient || "Configured"}</span>
+              <span>🔔 App Alerts</span>
+              {unreadCount > 0 && (
+                <span className="bg-red-500 text-white text-[11px] font-black px-1.5 py-0.5 rounded-full animate-bounce">
+                  {unreadCount}
+                </span>
+              )}
+            </button>
+
+            {/* Test Top-Bar Notification Button */}
+            <button
+              onClick={handleTestMobileNotification}
+              className="bg-yellow-300 text-[#33691e] px-3.5 py-2 rounded-lg shadow hover:bg-yellow-400 transition font-bold text-xs flex items-center gap-1"
+              title="Test the native notification bar alert on mobile"
+            >
+              📲 Test Top-Bar Alert
             </button>
 
             <button
@@ -405,7 +496,7 @@ const Dborad = () => {
         </header>
 
         {/* ========================================================================= */}
-        {/* HEATER CONTROL & SYSTEM SAFETY STATUS (Requirement 4 & 24)               */}
+        {/* HEATER CONTROL & SYSTEM SAFETY STATUS                                     */}
         {/* ========================================================================= */}
         <section className="mb-8">
           <motion.div
@@ -424,7 +515,7 @@ const Dborad = () => {
                   </h2>
                 </div>
                 <p className="text-xs md:text-sm text-[#558b2f] mt-1 font-medium">
-                  Dual-mode controller with temperature hysteresis protection and dedicated SMS dispatch
+                  Dual-mode controller with temperature hysteresis protection and top-bar mobile notifications
                 </p>
               </div>
 
@@ -516,32 +607,24 @@ const Dborad = () => {
                 </div>
               </div>
 
-              {/* Card 3: SMS Dispatch & Recipient */}
+              {/* Card 3: Mobile Application Notification Alert */}
               <div className="p-4 bg-[#dcedc8] rounded-2xl border border-[#c5e1a5] flex flex-col justify-between">
                 <span className="text-xs uppercase tracking-wider font-semibold text-[#558b2f]">
-                  SMS Notification
+                  Mobile Notification Alert
                 </span>
                 <div className="my-1">
                   <div className="text-sm font-bold flex items-center gap-1.5">
-                    Status:{" "}
-                    <span
-                      className={`font-black ${
-                        heaterState.smsStatus === "SENT"
-                          ? "text-green-700"
-                          : heaterState.smsStatus === "FAILED"
-                          ? "text-red-600"
-                          : "text-gray-700"
-                      }`}
-                    >
-                      {heaterState.smsStatus || "NOT REQUIRED"}
+                    <span className="text-green-700 font-extrabold flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full bg-green-600 animate-pulse"></span>
+                      ACTIVE (Top Status Bar)
                     </span>
                   </div>
                   <div className="text-xs text-[#33691e] font-medium mt-1">
-                    To: <span className="font-mono font-bold">{heaterState.maskedRecipient || "Registered Mobile"}</span>
+                    Channel: <span className="font-semibold text-[#2e7d32]">High Priority / Sound</span>
                   </div>
                 </div>
                 <div className="text-[10px] text-[#558b2f]">
-                  No default number; strictly user-bound
+                  Pops down at the top of the mobile screen on state changes
                 </div>
               </div>
 
@@ -560,11 +643,11 @@ const Dborad = () => {
                     </span>
                   </div>
                   <div>
-                    <span className="font-semibold">Last Alert: </span>
+                    <span className="font-semibold">Latest Alert: </span>
                     <span className="font-mono">
-                      {heaterState.lastNotificationAt
-                        ? new Date(heaterState.lastNotificationAt).toLocaleTimeString()
-                        : "None"}
+                      {notifications[0]
+                        ? new Date(notifications[0].createdAt).toLocaleTimeString()
+                        : "Active"}
                     </span>
                   </div>
                 </div>
@@ -662,7 +745,6 @@ const Dborad = () => {
 
         {/* WEATHER + PARAMETER TRENDS */}
         <section className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          {/* Weather Card */}
           <motion.div
             className="col-span-1 h-fit self-center bg-[#f0f4c3] text-[#33691e] rounded-3xl shadow-lg p-6 border border-[#cddc39]"
             whileHover={{ scale: 1.02 }}
@@ -700,7 +782,6 @@ const Dborad = () => {
             </div>
           </motion.div>
 
-          {/* Trend Chart Card */}
           <motion.div
             className="col-span-1 md:col-span-2 bg-[#f0f4c3] text-[#33691e] rounded-3xl shadow-lg p-6 flex flex-col justify-center border border-[#cddc39]"
             whileHover={{ scale: 1.01 }}
@@ -806,7 +887,82 @@ const Dborad = () => {
       </main>
 
       {/* ========================================================================= */}
-      {/* THRESHOLD SETTINGS MODAL (Requirement 2 & 23)                            */}
+      {/* MOBILE APPLICATION NOTIFICATIONS CENTER MODAL                             */}
+      {/* ========================================================================= */}
+      <AnimatePresence>
+        {showNotificationCenter && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-[#f0f4c3] text-[#33691e] rounded-3xl p-6 md:p-8 max-w-lg w-full shadow-2xl border-2 border-[#cddc39] max-h-[85vh] flex flex-col"
+            >
+              <div className="flex justify-between items-center pb-3 border-b border-[#cddc39]">
+                <div>
+                  <h3 className="text-xl font-bold flex items-center gap-2">
+                    <span>🔔</span> Application Alerts
+                  </h3>
+                  <p className="text-xs text-[#558b2f]">Real-time mobile top-bar alert history</p>
+                </div>
+                <button
+                  onClick={() => setShowNotificationCenter(false)}
+                  className="text-gray-500 hover:text-gray-800 text-2xl font-bold"
+                >
+                  &times;
+                </button>
+              </div>
+
+              <div className="overflow-y-auto my-4 space-y-2.5 pr-1 flex-1">
+                {notifications.length === 0 ? (
+                  <div className="p-6 text-center text-sm text-[#558b2f]">
+                    No alerts received yet. Alerts will appear here and in your phone's top notification bar.
+                  </div>
+                ) : (
+                  notifications.map((n) => (
+                    <div
+                      key={n.id}
+                      className={`p-3.5 rounded-2xl border transition-all ${
+                        n.heaterStatus === "ON"
+                          ? "bg-red-50 border-red-200"
+                          : "bg-[#dcedc8] border-[#c5e1a5]"
+                      }`}
+                    >
+                      <div className="flex justify-between items-start gap-2">
+                        <span className="font-extrabold text-sm text-[#2e7d32]">
+                          {n.title}
+                        </span>
+                        <span className="text-[10px] text-gray-500 font-mono">
+                          {n.createdAt ? new Date(n.createdAt).toLocaleTimeString() : ""}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[#33691e] mt-1 font-medium">{n.message}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="pt-3 border-t border-[#cddc39] flex justify-between items-center">
+                <button
+                  onClick={handleTestMobileNotification}
+                  className="text-xs text-[#2e7d32] font-bold hover:underline"
+                >
+                  📲 Fire Test Alert to Status Bar
+                </button>
+                <button
+                  onClick={() => setShowNotificationCenter(false)}
+                  className="px-5 py-2 rounded-lg bg-[#33691e] text-[#f0f4c3] text-sm font-bold shadow hover:bg-[#2e7d32]"
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ========================================================================= */}
+      {/* THRESHOLD SETTINGS MODAL                                                  */}
       {/* ========================================================================= */}
       <AnimatePresence>
         {showSettingsModal && (
@@ -828,7 +984,7 @@ const Dborad = () => {
               </div>
 
               <p className="text-xs text-[#558b2f] mb-4">
-                Set the temperatures at which the heater automatically switches. To prevent rapid switching, ON threshold must be strictly lower than OFF threshold.
+                Set temperatures at which the heater automatically switches. ON threshold must be strictly lower than OFF threshold.
               </p>
 
               <form onSubmit={handleSaveThresholds} className="space-y-4">
@@ -867,7 +1023,7 @@ const Dborad = () => {
                 </div>
 
                 <div className="p-3 bg-[#dcedc8] rounded-xl text-xs text-[#33691e]">
-                  🛡️ <strong>Hysteresis Safety:</strong> Temperature between {tempThresholds.onThreshold || 30}°C and {tempThresholds.offThreshold || 35}°C keeps the previous heater state, protecting hardware from frequent cycling.
+                  🛡️ <strong>Hysteresis Safety:</strong> Temperature between {tempThresholds.onThreshold || 30}°C and {tempThresholds.offThreshold || 35}°C keeps the previous heater state.
                 </div>
 
                 <div className="flex justify-end gap-3 pt-2">
@@ -883,99 +1039,6 @@ const Dborad = () => {
                     className="px-5 py-2 rounded-lg bg-[#33691e] text-[#f0f4c3] text-sm font-bold shadow hover:bg-[#2e7d32]"
                   >
                     Save Thresholds
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* ========================================================================= */}
-      {/* USER PROFILE & MOBILE NUMBER MODAL (Requirement 8, 10, 29, 30)           */}
-      {/* ========================================================================= */}
-      <AnimatePresence>
-        {showProfileModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-            <motion.div
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-[#f0f4c3] text-[#33691e] rounded-3xl p-6 md:p-8 max-w-md w-full shadow-2xl border-2 border-[#cddc39]"
-            >
-              <div className="flex justify-between items-center mb-4">
-                <h3 className="text-xl font-bold">Registered Alert Mobile Number</h3>
-                <button
-                  onClick={() => setShowProfileModal(false)}
-                  className="text-gray-500 hover:text-gray-800 text-2xl font-bold"
-                >
-                  &times;
-                </button>
-              </div>
-
-              <p className="text-xs text-[#558b2f] mb-4">
-                Heater state-change SMS alerts are sent exclusively to your registered mobile number below. No default phone number is used.
-              </p>
-
-              <form onSubmit={handleSaveProfile} className="space-y-4">
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
-                    Mobile Number for SMS Alerts
-                  </label>
-                  <input
-                    type="tel"
-                    value={userProfile.phoneNumber || ""}
-                    onChange={(e) =>
-                      setUserProfile({ ...userProfile, phoneNumber: e.target.value })
-                    }
-                    placeholder="+919876543210"
-                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-mono font-bold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
-                    required
-                  />
-                  <span className="text-[11px] text-[#558b2f]">Format: E.164 (e.g. +919876543210)</span>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
-                    Your Name
-                  </label>
-                  <input
-                    type="text"
-                    value={userProfile.name || ""}
-                    onChange={(e) =>
-                      setUserProfile({ ...userProfile, name: e.target.value })
-                    }
-                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-semibold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider mb-1">
-                    Farm Name
-                  </label>
-                  <input
-                    type="text"
-                    value={userProfile.farmName || ""}
-                    onChange={(e) =>
-                      setUserProfile({ ...userProfile, farmName: e.target.value })
-                    }
-                    className="w-full px-3 py-2 rounded-lg border border-[#cddc39] bg-white text-[#33691e] font-semibold focus:outline-none focus:ring-2 focus:ring-[#33691e]"
-                  />
-                </div>
-
-                <div className="flex justify-end gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowProfileModal(false)}
-                    className="px-4 py-2 rounded-lg border border-[#cddc39] text-sm font-semibold hover:bg-[#dcedc8]"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 rounded-lg bg-[#33691e] text-[#f0f4c3] text-sm font-bold shadow hover:bg-[#2e7d32]"
-                  >
-                    Update Mobile
                   </button>
                 </div>
               </form>
